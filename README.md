@@ -2,7 +2,7 @@
 [![Telegram channel](https://img.shields.io/endpoint?url=https://runkit.io/damiankrawczyk/telegram-badge/branches/master?url=https://t.me/bots_forge)](https://t.me/bots_forge)
 
 <p align="center">
-  <img src=".images/logo.png" alt="CloudFlare Turnstile Solver Logo" width="200"/>
+  <img src="images/logo.png" alt="CloudFlare Turnstile Solver Logo" width="200"/>
 </p>
 
 A local server for solving CloudFlare Turnstile CAPTCHA challenges and returning ready-to-use tokens. This tool automates the process of solving Turnstile CAPTCHAs, which can be integrated into your applications that need to bypass CloudFlare protection. You can use it in your bots by making requests to this local server with CAPTCHA tasks and receiving ready tokens in response.
@@ -17,7 +17,7 @@ A local server for solving CloudFlare Turnstile CAPTCHA challenges and returning
 ## Demo
 
 <p align="center">
-  <img src=".images/demo1.png" alt="CloudFlare Turnstile Solver Demo" width="600"/>
+  <img src="images/demo1.png" alt="CloudFlare Turnstile Solver Demo" width="600"/>
 </p>
 
 ## Requirements
