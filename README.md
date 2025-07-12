@@ -188,6 +188,7 @@ LOG_LEVEL=DEBUG
 
 ## Support
 Developed by `MrSmith06`: [telegram](https://t.me/Mr_Smith06) |  [gtihub](https://github.com/MrSmith06)
+
 API server by me: [telegram](https://t.me/inanitynoupcase) |   [gtihub](https://github.com/inanitynoupcase)
 If you find this project helpful, feel free to leave a tip!
 - EVM address (metamask): `0x6201d7364F01772F8FbDce67A9900d505950aB99`
