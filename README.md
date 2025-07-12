@@ -177,13 +177,16 @@ Before starting the application, you need to create a `.env` file in the root di
 ### Example .env file
 
 ```
-max_workers=2
+# API Authentication
+API_KEY=your_secret_api_key_here
 
-PROXY=username:password@host:port
+# Server settings
+PORT=your_number
+LOG_LEVEL=INFO
+max_workers=your_number
 
-PORT=5033
-API_KEY=9a35d691-6522-410e-8822-5c697bd28286
-LOG_LEVEL=DEBUG
+# Browser settings (from original project 2)
+# PROXY=username:password@host:port
 ```
 
 ## Support
