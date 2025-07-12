@@ -1,5 +1,4 @@
 # CloudFlare Turnstile Solver
-[![Telegram channel](https://img.shields.io/endpoint?url=https://runkit.io/damiankrawczyk/telegram-badge/branches/master?url=https://t.me/bots_forge)](https://t.me/bots_forge)
 
 <p align="center">
   <img src="images/logo.png" alt="CloudFlare Turnstile Solver Logo" width="200"/>
