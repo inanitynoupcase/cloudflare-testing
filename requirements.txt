@@ -1,0 +1,12 @@
+loguru
+pydantic
+python-dotenv
+proxystr
+patchright
+playwright
+python-socketio
+flask[async]
+hypercorn
+
+pyautogui
+opencv-python
