@@ -55,7 +55,7 @@ python app.py
 
 The server will start on `http://localhost:5033` by default.
 
-### API Endpoints
+### API Endpoints (Local)
 
 #### Create a CAPTCHA Solving Task
 
@@ -110,6 +110,21 @@ Response (when ready):
     "token": "03AFY_a8UAzGWJsGKzUVMDRzk9..."
   }
 }
+```
+
+### API Endpoints (Server)
+
+### Create a CAPTCHA Solving Task
+
+```
+GET /turnstile?url=https://example.com&sitekey=0x4AAAAAAA
+```
+
+
+#### Get Task Result
+
+```
+GET /result?id=id_task
 ```
 
 ### Example Usage
