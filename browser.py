@@ -216,7 +216,7 @@ class BrowserHandler(metaclass=Singleton):
         async with config["lock"]:
             try:
                 async with aiohttp.ClientSession() as session:
-                    url = f"https://api.kiotproxy.com/api/v1/proxies/new?key={config['api_key']}®ion={config['region']}"
+                    url = f"https://api.kiotproxy.com/api/v1/proxies/new?key={config['api_key']}&region={config['region']}"
                     async with session.get(url, timeout=10) as resp:
                         data = await resp.json()
                         if data["success"]:
