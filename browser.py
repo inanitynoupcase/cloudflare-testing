@@ -280,7 +280,31 @@ class BrowserHandler(metaclass=Singleton):
                 context.set_default_timeout(30000)
                 context.set_default_navigation_timeout(30000)
 
-    async def close(self):
+                page = await context.new_page()
+                
+                # Set window position for non-headless
+                if not self.headless:
+                    try:
+                        position = self.window_manager.get_free_position()
+                        await self.set_window_position(page, position["x"], position["y"])
+                        page._grid_position_id = position["id"]
+                    except Exception as e:
+                        logger.warning(f"Failed to set window position: {e}")
+                        page._grid_position_id = 0
+                else:
+                    page._grid_position_id = 0
+                    
+                return page
+                
+            except Exception as e:
+                logger.warning(f"Get page attempt {attempt + 1} failed: {e}")
+                if attempt == max_retries - 1:
+                    await self.cleanup_all()
+                    raise
+                await asyncio.sleep(1)
+
+    async def cleanup_all(self):
+        """Complete cleanup of all browser resources"""
         try:
             if self.proxy_task:
                 self.proxy_task.cancel()
