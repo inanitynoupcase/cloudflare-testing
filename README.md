@@ -5,6 +5,7 @@
 </p>
 
 A local server for solving CloudFlare Turnstile CAPTCHA challenges and returning ready-to-use tokens. This tool automates the process of solving Turnstile CAPTCHAs, which can be integrated into your applications that need to bypass CloudFlare protection. You can use it in your bots by making requests to this local server with CAPTCHA tasks and receiving ready tokens in response.
+
 ## Features
 
 - Solves CloudFlare Turnstile CAPTCHA challenges
@@ -26,12 +27,14 @@ A local server for solving CloudFlare Turnstile CAPTCHA challenges and returning
 ## Installation
 
 1. Clone the repository:
+
 ```bash
 git clone https://github.com/BotsForge/CloudFlare.git
 cd CloudFlare
 ```
 
 2. Install the required dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -40,12 +43,12 @@ pip install -r requirements.txt
 
 This project uses [patchright-python](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) for browser automation. Special thanks to its creators.
 
-
 ## Usage
 
 ### Starting the Server
 
 Run the application:
+
 ```bash
 python app.py
 ```
@@ -61,6 +64,7 @@ POST /createTask
 ```
 
 Request body:
+
 ```json
 {
   "clientKey": "your_api_key",
@@ -73,6 +77,7 @@ Request body:
 ```
 
 Response:
+
 ```json
 {
   "taskId": "12345678-1234-1234-1234-123456789012",
@@ -87,6 +92,7 @@ POST /getTaskResult
 ```
 
 Request body:
+
 ```json
 {
   "clientKey": "your_api_key",
@@ -95,6 +101,7 @@ Request body:
 ```
 
 Response (when ready):
+
 ```json
 {
   "taskId": "12345678-1234-1234-1234-123456789012",
@@ -190,10 +197,12 @@ max_workers=your_number
 ```
 
 ## Support
-Developed by `MrSmith06`: [telegram](https://t.me/Mr_Smith06) |  [gtihub](https://github.com/MrSmith06)
 
-API server by me: [telegram](https://t.me/inanitynoupcase) |   [gtihub](https://github.com/inanitynoupcase)
+Developed by `MrSmith06`: [telegram](https://t.me/Mr_Smith06) | [gtihub](https://github.com/MrSmith06)
+
+API server by me: [telegram](https://t.me/inanitynoupcase) | [gtihub](https://github.com/inanitynoupcase)
 
 If you find this project helpful, feel free to leave a tip!
+
 - EVM address (metamask): `0x6201d7364F01772F8FbDce67A9900d505950aB99`
 - EVM address (me): `0x387A7A3Fb268445dB0845ab573F64D8f31c43aC7`

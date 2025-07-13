@@ -37,7 +37,7 @@ except ImportError:
 
 from source import Singleton
 from models import CaptchaTask
-K2a5ab890111e49ccb22c7c0271ab4b2f
+
 load_dotenv()
 
 class LinuxWindowGridManager:
@@ -162,259 +162,297 @@ class BrowserHandler(metaclass=Singleton):
             "lock": asyncio.Lock()
         }
         self.proxy_task = None
-
-    @staticmethod
-    def read_proxy():
-        if proxy := os.getenv('PROXY'):
-            if Proxy:
-                try:
-                    return Proxy(proxy).playwright
-                except Exception as e:
-                    logger.warning(f"Failed to parse proxy: {e}")
-                    return None
-            else:
-                logger.warning("proxystr not available, proxy ignored")
-                return None
-        return None
-
-    def _should_run_headless(self):
-        """Determine if should run headless based on environment"""
+        self.browser_processes = set()  # Track browser processes
+        self.last_cleanup = time()
         
-        # Force headless if explicitly set
-        if os.environ.get('FORCE_HEADLESS', '').lower() == 'true':
-            return True
-            
-        # Run headless if no display available
-        if not os.environ.get('DISPLAY'):
-            logger.info("No DISPLAY environment variable, running headless")
-            return True
-            
-        # Run headless if pyautogui not available
-        if not pyautogui:
-            logger.info("pyautogui not available, running headless")
-            return True
-            
-        # Check if we can actually use the display
+    def cleanup_zombie_processes(self):
+        """Kill zombie browser processes"""
         try:
-            import subprocess
-            result = subprocess.run(['xdpyinfo'], capture_output=True, timeout=5)
-            if result.returncode != 0:
-                logger.info("Cannot access X display, running headless")
-                return True
-        except Exception:
-            logger.info("xdpyinfo not available, running headless")
-            return True
-            
-        logger.info("Display available, running with GUI")
-        return False
-
-    async def _load_kiotproxy(self):
-        """Tải proxy mới từ KiotProxy API"""
-        config = self.proxy_config
-        async with config["lock"]:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    url = f"https://api.kiotproxy.com/api/v1/proxies/new?key={config['api_key']}&region={PROXY_REGION}"
-                    async with session.get(url, timeout=10) as resp:
-                        data = await resp.json()
-                        if data["success"]:
-                            proxy_data = data["data"]
-                            config["proxy"] = f"http://{proxy_data['http']}"
-                            config["ttc"] = proxy_data["ttc"]
-                            config["last_fetch"] = time.time()
-                            logger.success(
-                                f"Đã tải proxy: {proxy_data['http']} | "
-                                f"Vị trí: {proxy_data['location']} | "
-                                f"TTC: {proxy_data['ttc']}s"
-                            )
-                        else:
-                            error_msg = data.get('message', 'Lỗi không xác định')
-                            logger.error(f"Lỗi API KiotProxy: {error_msg}")
-                            if "giới hạn" in error_msg or "rate" in error_msg.lower():
-                                logger.warning("Phát hiện giới hạn rate, chờ 60s...")
-                                await asyncio.sleep(60)
-                            config["proxy"] = None
-                            raise ValueError(error_msg)
-            except aiohttp.ClientError as e:
-                logger.error(f"Lỗi mạng: {str(e)}")
-                raise
-            except Exception as e:
-                logger.error(f"Lỗi tải proxy: {str(e)}")
-                raise
-
-    async def _refresh_proxy_periodically(self):
-        """Làm mới proxy định kỳ"""
-        config = self.proxy_config
-        consecutive_errors = 0
-
-        while True:
-            try:
-                # Kiểm tra proxy còn hợp lệ
-                if config["proxy"] and config["ttc"]:
-                    time_since_fetch = time.time() - config["last_fetch"]
-                    time_remaining = config["ttc"] - time_since_fetch
-                    if time_remaining > 60:
-                        logger.debug(f"Proxy còn hợp lệ trong {time_remaining:.0f}s")
-                        await asyncio.sleep(min(time_remaining - 30, 300))
-                        continue
-
-                # Tải proxy mới
-                logger.info("Đang làm mới proxy...")
-                await self._load_kiotproxy()
-                consecutive_errors = 0
-
-                # Chờ theo TTC
-                wait_time = max(config["ttc"] - 30, 60) if config["ttc"] else 300
-                logger.debug(f"Làm mới tiếp theo sau {wait_time}s")
-                await asyncio.sleep(wait_time)
-
-            except Exception as e:
-                consecutive_errors += 1
-
-                if "giới hạn" in str(e) or "rate" in str(e).lower():
-                    wait_time = min(300 * consecutive_errors, 1800)
-                    logger.error(f"Giới hạn rate #{consecutive_errors}, chờ {wait_time}s")
-                else:
-                    wait_time = min(60 * consecutive_errors, 600)
-                    logger.error(f"Lỗi #{consecutive_errors}: {str(e)}, chờ {wait_time}s")
-
-                await asyncio.sleep(wait_time)
+            current_time = time()
+            if current_time - self.last_cleanup < 60:  # Cleanup every minute
+                return
+                
+            for proc in psutil.process_iter(['pid', 'name', 'create_time']):
+                try:
+                    if proc.info['name'] in ['chrome', 'chromium', 'chromium-browser']:
+                        # Kill processes older than 5 minutes
+                        if current_time - proc.info['create_time'] > 300:
+                            logger.warning(f"Killing zombie browser process {proc.info['pid']}")
+                            proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+                    
+            self.last_cleanup = current_time
+        except Exception as e:
+            logger.debug(f"Cleanup error: {e}")
 
     async def launch(self):
-        """Khởi động browser Chrome và task proxy nếu chưa có"""
-        if not self.proxy_task:
-            self.proxy_task = asyncio.create_task(self._refresh_proxy_periodically())
-        self.playwright = await async_playwright().start()
-        
-        # Browser arguments
-        args = [
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-            '--disable-dev-shm-usage',
-        ]
-        
-        if not self.headless:
-            args.extend([
-                "--window-size=500,200",
-                "--window-position=0,0"
-            ])
-        else:
-            args.extend([
-                '--disable-gpu',
-                '--disable-web-security',
-                '--window-size=1920,1080'
-            ])
-        
-        # Launch browser
-        launch_options = {
-            'headless': self.headless,
-            'args': args
-        }
-        
-        if self.proxy:
-            launch_options['proxy'] = self.proxy
-            
-        # Try different browser channels
+        """Launch browser with improved error handling and cleanup"""
         try:
-            if not self.headless:
-                # Try Chrome first for non-headless
+            # Cleanup old processes first
+            self.cleanup_zombie_processes()
+            
+            if not self.proxy_task:
+                self.proxy_task = asyncio.create_task(self._refresh_proxy_periodically())
+                
+            if self.playwright:
                 try:
-                    self.browser = await self.playwright.chromium.launch(
-                        channel='chrome',
-                        **launch_options
-                    )
-                    logger.success("Launched Chrome browser")
-                except Exception:
-                    # Fallback to Chromium
-                    self.browser = await self.playwright.chromium.launch(**launch_options)
-                    logger.success("Launched Chromium browser")
+                    await self.playwright.stop()
+                except:
+                    pass
+                    
+            self.playwright = await async_playwright().start()
+            
+            # Browser arguments with better stability
+            args = [
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-extensions',
+                '--disable-plugins',
+                '--disable-images',  # Speed up loading
+                '--disable-javascript',  # We'll enable it selectively
+                '--memory-pressure-off',
+                '--max_old_space_size=512',  # Limit memory
+            ]
+            
+            if not self.headless:
+                args.extend([
+                    "--window-size=500,200",
+                    "--window-position=0,0"
+                ])
             else:
-                # For headless, use Chromium
-                self.browser = await self.playwright.chromium.launch(**launch_options)
-                logger.success("Launched headless Chromium browser")
+                args.extend([
+                    '--disable-gpu',
+                    '--disable-web-security',
+                    '--window-size=1920,1080'
+                ])
+            
+            launch_options = {
+                'headless': self.headless,
+                'args': args,
+                'timeout': 30000,  # 30 second timeout
+            }
+            
+            if self.proxy:
+                launch_options['proxy'] = self.proxy
+                
+            # Launch with timeout
+            try:
+                self.browser = await asyncio.wait_for(
+                    self.playwright.chromium.launch(**launch_options),
+                    timeout=30
+                )
+                logger.success("Browser launched successfully")
+            except asyncio.TimeoutError:
+                logger.error("Browser launch timeout")
+                raise
                 
         except Exception as e:
             logger.error(f"Failed to launch browser: {e}")
+            await self.cleanup_all()
             raise
 
     async def get_page(self):
-        if not self.playwright or not self.browser:
-            await self.launch()
-
-        # Create context
-        config = self.proxy_config
-        context_options = {}
-        async with config["lock"]:
-            if config["proxy"]:
-                context_options["proxy"] = {"server": config["proxy"]}
-                logger.debug(f"Sử dụng proxy: {config['proxy']}")
-
-        if not self.headless:
-            context_options['viewport'] = {"width": 500, "height": 100}
-        else:
-            context_options['viewport'] = {"width": 1920, "height": 1080}
-            
-        context = await self.browser.new_context(**context_options)
-
-        logger.debug("Opening new page")
-        page = await context.new_page()
-        
-        # Set window position for non-headless
-        if not self.headless:
+        """Get page with timeout and retry logic"""
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                position = self.window_manager.get_free_position()
-                await self.set_window_position(page, position["x"], position["y"])
-                page._grid_position_id = position["id"]
-            except Exception as e:
-                logger.warning(f"Failed to set window position: {e}")
-                page._grid_position_id = 0
-        else:
-            page._grid_position_id = 0
-            
-        return page
+                if not self.playwright or not self.browser:
+                    await self.launch()
 
-    async def set_window_position(self, page, x, y):
-        """Set window position (only works in non-headless mode)"""
-        if self.headless:
-            return
-            
-        try:
-            session = await page.context.new_cdp_session(page)
-            result = await session.send("Browser.getWindowForTarget")
-            window_id = result["windowId"]
-            await session.send("Browser.setWindowBounds", {
-                "windowId": window_id,
-                "bounds": {
-                    "left": x,
-                    "top": y,
-                    "width": 500,
-                    "height": 200
-                }
-            })
-        except Exception as e:
-            logger.debug(f"Failed to set window position: {e}")
+                # Create context with timeout
+                config = self.proxy_config
+                context_options = {'timeout': 30000}
+                
+                async with config["lock"]:
+                    if config["proxy"]:
+                        context_options["proxy"] = {"server": config["proxy"]}
+
+                if not self.headless:
+                    context_options['viewport'] = {"width": 500, "height": 100}
+                else:
+                    context_options['viewport'] = {"width": 1920, "height": 1080}
+                    
+                context = await self.browser.new_context(**context_options)
+                
+                # Set timeout for all pages in context
+                context.set_default_timeout(30000)
+                context.set_default_navigation_timeout(30000)
 
     async def close(self):
         try:
+            if self.proxy_task:
+                self.proxy_task.cancel()
+                try:
+                    await self.proxy_task
+                except asyncio.CancelledError:
+                    pass
+                self.proxy_task = None
+                
             if self.browser:
-                await self.browser.close()
-        except Exception as e:
-            logger.error(f"Error closing browser: {e}")
-        try:
+                try:
+                    await asyncio.wait_for(self.browser.close(), timeout=10)
+                except:
+                    pass
+                self.browser = None
+                
             if self.playwright:
-                await self.playwright.stop()
+                try:
+                    await asyncio.wait_for(self.playwright.stop(), timeout=10)
+                except:
+                    pass
+                self.playwright = None
+                
+            # Force cleanup zombie processes
+            self.cleanup_zombie_processes()
+            
         except Exception as e:
-            logger.error(f"Error stopping playwright: {e}")
+            logger.error(f"Cleanup error: {e}")
 
     async def close_page(self, page):
+        """Improved page cleanup"""
         try:
             if hasattr(page, '_grid_position_id'):
                 self.window_manager.release_position(page._grid_position_id)
-            await page.close()
-            await page.context.close()
+                
+            # Close with timeout
+            if page:
+                await asyncio.wait_for(page.close(), timeout=5)
+            if page.context:
+                await asyncio.wait_for(page.context.close(), timeout=5)
+                
         except Exception as e:
-            logger.error(f"Error closing page: {e}")
+            logger.debug(f"Error closing page: {e}")
 
+class Browser:
+    def __init__(self, page=None):
+        self.page = page
+        self.lock = asyncio.Lock()
+
+    async def solve_captcha(self, task: CaptchaTask):
+        """Improved solve_captcha with proper timeout and cleanup"""
+        page = None
+        try:
+            async with asyncio.timeout(120):  # 2 minute total timeout
+                page = await BrowserHandler().get_page()
+                
+                # Determine if we can use advanced features
+                handler = BrowserHandler()
+                use_advanced_features = not handler.headless and cv2 and pyautogui
+                
+                if use_advanced_features:
+                    await self.block_rendering()
+                    
+                logger.debug(f"Navigating to {task.websiteURL}")
+                await page.goto(task.websiteURL, timeout=30000)
+                
+                if use_advanced_features:
+                    await self.unblock_rendering()
+                    
+                await self.load_captcha(page, websiteKey=task.websiteKey)
+                return await self.wait_for_turnstile_token(page, use_advanced_features)
+                
+        except asyncio.TimeoutError:
+            logger.error("Captcha solving timeout")
+            return None
+        except Exception as e:
+            logger.error(f"Error in solve_captcha: {e}")
+            return None
+        finally:
+            if page:
+                await BrowserHandler().close_page(page)
+
+    async def load_captcha(self, page, websiteKey: str = '0x4AAAAAAA0SGzxWuGl6kriB', action: str = ''):
+        """Load captcha with improved script"""
+        script = f"""
+        // Remove previous captcha if exists
+        const existing = document.querySelector('#captcha-overlay');
+        if (existing) existing.remove();
+
+        // Create overlay
+        const overlay = document.createElement('div');
+        overlay.id = 'captcha-overlay';
+        overlay.style.position = 'fixed';
+        overlay.style.top = '0';
+        overlay.style.left = '0';
+        overlay.style.width = '100vw';
+        overlay.style.height = '100vh';
+        overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+        overlay.style.display = 'flex';
+        overlay.style.justifyContent = 'center';
+        overlay.style.alignItems = 'center';
+        overlay.style.zIndex = '1000';
+
+        // Add captcha widget
+        const captchaDiv = document.createElement('div');
+        captchaDiv.className = 'cf-turnstile';
+        captchaDiv.setAttribute('data-sitekey', '{websiteKey}');
+        captchaDiv.setAttribute('data-callback', 'onCaptchaSuccess');
+        captchaDiv.setAttribute('data-action', '{action}');
+
+        overlay.appendChild(captchaDiv);
+        document.body.appendChild(overlay);
+
+        // Callback function
+        window.onCaptchaSuccess = function(token) {{
+            console.log('Captcha solved:', token);
+        }};
+
+        // Load Cloudflare Turnstile script
+        if (!document.querySelector('script[src*="turnstile"]')) {{
+            const script = document.createElement('script');
+            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+            script.async = true;
+            script.defer = true;
+            document.head.appendChild(script);
+        }}
+        """
+
+        await page.evaluate(script)
+
+    async def wait_for_turnstile_token(self, page, use_advanced_features=False) -> str | None:
+        """Improved token waiting with better error handling"""
+        try:
+            locator = page.locator('input[name="cf-turnstile-response"]')
+
+            token = ""
+            start_time = time()
+            timeout = 90  # 90 seconds timeout
+            click_attempted = False
+            
+            while not token and (time() - start_time) < timeout:
+                await asyncio.sleep(1)
+                try:
+                    token = await locator.input_value(timeout=1000)
+                    
+                    if not token and not click_attempted:
+                        # Try clicking the widget once
+                        try:
+                            widget = page.locator('.cf-turnstile')
+                            if await widget.is_visible(timeout=2000):
+                                await widget.click(timeout=2000)
+                                click_attempted = True
+                                logger.debug('Widget click performed')
+                        except:
+                            pass
+                            
+                except Exception as er:
+                    logger.debug(f'Token check error: {er}')
+                    
+                if token:
+                    logger.debug(f'Got captcha token: {token[:50]}...')
+                    break
+                    
+            if not token:
+                logger.warning('Token not found within timeout')
+                
+            return token
+            
+        except Exception as e:
+            logger.error(f"Error waiting for token: {e}")
+            return None
+            
 class Browser:
     def __init__(self, page=None):
         self.page = page

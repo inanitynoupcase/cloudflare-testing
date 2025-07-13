@@ -1,3 +1,5 @@
+# api_wrapper.py - Improved version with health monitoring and auto-recovery
+
 import asyncio
 import uuid
 import json
@@ -5,8 +7,9 @@ from time import time
 import os
 import sys
 import subprocess
+import signal
 
-from quart import Quart, request, jsonify # type: ignore
+from quart import Quart, request, jsonify
 from loguru import logger
 from dotenv import load_dotenv
 
@@ -28,6 +31,10 @@ class DockerTurnstileAPI:
     def __init__(self, max_workers: int = 3):
         self.app = Quart(__name__)
         self.max_workers = max_workers
+        self.last_health_check = time()
+        self.health_check_interval = 30  # 30 seconds
+        self.restart_threshold = 5  # restart after 5 consecutive failures
+        self.consecutive_failures = 0
         
         # Use existing project 2 components
         self.app_tasker = AppTasker()
@@ -35,6 +42,9 @@ class DockerTurnstileAPI:
         
         # Set solver in app_tasker
         self.app_tasker.solvers['AntiTurnstileTaskProxyLess'] = self.async_tasker
+        
+        # Health monitoring task
+        self.health_monitor_task = None
         
         self._setup_routes()
         
@@ -54,11 +64,16 @@ class DockerTurnstileAPI:
         # Status and documentation
         self.app.route('/')(self.index)
         self.app.route('/status')(self.status)
+        self.app.route('/health')(self.health)
+        self.app.route('/reset', methods=['POST'])(self.force_reset)
         
     async def _startup(self):
         """Initialize on startup"""
         logger.info("🚀 Starting Docker Turnstile API...")
         logger.info(f"📊 Max workers: {self.max_workers}")
+        
+        # Start health monitoring
+        self.health_monitor_task = asyncio.create_task(self._health_monitor())
         
         # Check if we're in the right environment
         if not os.path.exists('/root/Desktop'):
@@ -73,6 +88,93 @@ class DockerTurnstileAPI:
         """Cleanup on shutdown"""
         logger.info("🛑 Shutting down API...")
         
+        if self.health_monitor_task:
+            self.health_monitor_task.cancel()
+            try:
+                await self.health_monitor_task
+            except asyncio.CancelledError:
+                pass
+                
+        # Force reset to cleanup resources
+        await self.async_tasker.force_reset()
+        
+    async def _health_monitor(self):
+        """Monitor system health and auto-recover"""
+        while True:
+            try:
+                await asyncio.sleep(self.health_check_interval)
+                
+                # Get health status
+                health_status = await self.async_tasker.health_check()
+                
+                # Log health status periodically
+                if int(time()) % 300 == 0:  # Every 5 minutes
+                    logger.info(f"📊 Health: {health_status}")
+                
+                # Check for issues
+                issues = []
+                
+                # Circuit breaker is open
+                if health_status['circuit_breaker_state'] == 'OPEN':
+                    issues.append("Circuit breaker is OPEN")
+                
+                # No success in last 10 minutes
+                if health_status['time_since_last_success'] > 600:
+                    issues.append("No successful tasks in 10+ minutes")
+                
+                # Success rate too low
+                if (health_status['total_tasks'] > 10 and 
+                    health_status['success_rate'] < 20):
+                    issues.append(f"Low success rate: {health_status['success_rate']:.1f}%")
+                
+                # Too many active tasks stuck
+                if health_status['active_tasks'] > self.max_workers * 2:
+                    issues.append(f"Too many active tasks: {health_status['active_tasks']}")
+                
+                # No available workers
+                if health_status['available_workers'] == 0:
+                    issues.append("No available workers")
+                
+                if issues:
+                    self.consecutive_failures += 1
+                    logger.warning(f"⚠️  Health issues detected ({self.consecutive_failures}): {', '.join(issues)}")
+                    
+                    # Auto-recovery if too many consecutive failures
+                    if self.consecutive_failures >= self.restart_threshold:
+                        logger.error(f"🔄 Auto-recovery triggered after {self.consecutive_failures} consecutive failures")
+                        await self._auto_recover()
+                        self.consecutive_failures = 0
+                else:
+                    self.consecutive_failures = 0
+                    
+            except Exception as e:
+                logger.error(f"Health monitor error: {e}")
+                await asyncio.sleep(5)
+    
+    async def _auto_recover(self):
+        """Automatic recovery procedure"""
+        try:
+            logger.info("🔄 Starting auto-recovery...")
+            
+            # Force reset the async tasker
+            await self.async_tasker.force_reset()
+            
+            # Clear app tasker data
+            self.app_tasker.tasks.clear()
+            self.app_tasker.results.clear()
+            
+            # Recreate async tasker
+            self.async_tasker = AsyncTasker(
+                max_workers=self.max_workers, 
+                callback_fn=self.app_tasker.add_result
+            )
+            self.app_tasker.solvers['AntiTurnstileTaskProxyLess'] = self.async_tasker
+            
+            logger.success("✅ Auto-recovery completed")
+            
+        except Exception as e:
+            logger.error(f"❌ Auto-recovery failed: {e}")
+
     async def create_task(self):
         """Handle /createTask endpoint (original project 2 format)"""
         try:
@@ -210,6 +312,41 @@ class DockerTurnstileAPI:
         except Exception as e:
             logger.error(f"❌ Error in get_result_simple: {e}")
             return jsonify({"error": str(e)}), 500
+
+    async def health(self):
+        """Detailed health endpoint"""
+        try:
+            health_status = await self.async_tasker.health_check()
+            health_status.update({
+                "api_status": "online",
+                "consecutive_failures": self.consecutive_failures,
+                "restart_threshold": self.restart_threshold,
+                "uptime": time() - self.last_health_check,
+                "environment": "docker",
+                "display": os.environ.get('DISPLAY', 'not_set')
+            })
+            return jsonify(health_status), 200
+        except Exception as e:
+            return jsonify({
+                "api_status": "error",
+                "error": str(e)
+            }), 500
+
+    async def force_reset(self):
+        """Force reset endpoint"""
+        try:
+            logger.warning("🔄 Manual reset triggered")
+            await self._auto_recover()
+            return jsonify({
+                "status": "success",
+                "message": "System reset completed"
+            }), 200
+        except Exception as e:
+            logger.error(f"❌ Manual reset failed: {e}")
+            return jsonify({
+                "status": "error",
+                "error": str(e)
+            }), 500
             
     async def status(self):
         """API status endpoint"""
@@ -219,7 +356,8 @@ class DockerTurnstileAPI:
             "active_tasks": len(self.app_tasker.tasks),
             "completed_results": len(self.app_tasker.results),
             "environment": "docker",
-            "display": os.environ.get('DISPLAY', 'not_set')
+            "display": os.environ.get('DISPLAY', 'not_set'),
+            "consecutive_failures": self.consecutive_failures
         }), 200
         
     async def index(self):
@@ -242,6 +380,7 @@ class DockerTurnstileAPI:
                 code {{ background: #e9ecef; padding: 2px 6px; border-radius: 3px; font-size: 12px; }}
                 .stats {{ display: flex; gap: 20px; }}
                 .stat {{ background: #007bff; color: white; padding: 10px; border-radius: 5px; text-align: center; }}
+                .warning {{ background: #fff3cd; border: 1px solid #ffeaa7; padding: 10px; border-radius: 5px; margin: 10px 0; }}
             </style>
         </head>
         <body>
@@ -251,8 +390,11 @@ class DockerTurnstileAPI:
                 <div class="status">
                     <strong>🟢 Status: Online</strong> | 
                     Workers: {self.max_workers} | 
-                    Display: {os.environ.get('DISPLAY', 'not_set')}
+                    Display: {os.environ.get('DISPLAY', 'not_set')} |
+                    Failures: {self.consecutive_failures}/{self.restart_threshold}
                 </div>
+                
+                {"<div class='warning'>⚠️ System experiencing issues - auto-recovery may trigger soon</div>" if self.consecutive_failures >= 3 else ""}
                 
                 <div class="stats">
                     <div class="stat">
@@ -293,13 +435,26 @@ class DockerTurnstileAPI:
                     <code>/result?id=task_uuid</code>
                 </div>
                 
+                <h3>Monitoring & Control</h3>
                 <div class="endpoint">
                     <h4><span class="method-get">GET</span> /status</h4>
-                    <p>API status and statistics</p>
+                    <p>Basic API status</p>
                     <code>/status</code>
                 </div>
                 
-                <p><small>🚀 Powered by original Project 2 logic running in Docker environment</small></p>
+                <div class="endpoint">
+                    <h4><span class="method-get">GET</span> /health</h4>
+                    <p>Detailed health status with metrics</p>
+                    <code>/health</code>
+                </div>
+                
+                <div class="endpoint">
+                    <h4><span class="method-post">POST</span> /reset</h4>
+                    <p>Force system reset (emergency use)</p>
+                    <code>/reset</code>
+                </div>
+                
+                <p><small>🚀 Enhanced with auto-recovery and health monitoring</small></p>
             </div>
         </body>
         </html>
@@ -325,11 +480,12 @@ def main():
     # Create API wrapper
     api = DockerTurnstileAPI(max_workers=args.workers)
     
-    logger.info(f"🚀 Starting Docker Turnstile API")
+    logger.info(f"🚀 Starting Enhanced Docker Turnstile API")
     logger.info(f"🌐 Host: {args.host}:{args.port}")
     logger.info(f"👥 Workers: {args.workers}")
     logger.info(f"🔑 API Key: {os.environ.get('API_KEY', 'not_set')}")
     logger.info(f"🖥️  Display: {os.environ.get('DISPLAY', 'not_set')}")
+    logger.info(f"🔄 Auto-recovery enabled: failures > {api.restart_threshold}")
     
     # Run the app
     api.app.run(host=args.host, port=args.port, debug=False)
