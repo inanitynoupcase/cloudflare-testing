@@ -1,5 +1,3 @@
-# docker_api_wrapper.py - API wrapper for existing Docker setup
-
 import asyncio
 import uuid
 import json
@@ -8,12 +6,11 @@ import os
 import sys
 import subprocess
 
-from quart import Quart, request, jsonify
+from quart import Quart, request, jsonify # type: ignore
 from loguru import logger
 from dotenv import load_dotenv
 
 # Add current directory to path to import existing modules
-sys.path.append('/root/Desktop/Turnstile-Solver')
 sys.path.append('/root/Desktop/cloudflare-testing')
 
 try:
@@ -338,3 +335,4 @@ def main():
     api.app.run(host=args.host, port=args.port, debug=False)
 
 if __name__ == '__main__':
+    main()
