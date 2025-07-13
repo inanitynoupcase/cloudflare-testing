@@ -1,22 +1,24 @@
-import asyncio
-from time import time
-import os
-import random
-import ctypes
+# -*- coding: utf-8 -*-
 
-from patchright.async_api import async_playwright
+import os
+import time
+import asyncio
+import aiohttp
 from loguru import logger
-from dotenv import load_dotenv
+from typing import Optional
+from patchright.async_api import async_playwright
 from proxystr import Proxy
 import cv2
 import numpy as np
 import pyautogui
+import random
+import ctypes
 
 from source import Singleton
 from models import CaptchaTask
 
+from dotenv import load_dotenv
 load_dotenv()
-
 
 class WindowGridManager:
     def __init__(self, window_width=500, window_height=200, vertical_overlap=60):
@@ -34,8 +36,7 @@ class WindowGridManager:
     @staticmethod
     def get_screen_size():
         user32 = ctypes.windll.user32
-        user32.SetProcessDPIAware()  # Обязательно для правильных размеров на экранах с масштабированием
-
+        user32.SetProcessDPIAware()  # Để lấy kích thước chính xác trên màn hình DPI cao
         screen_width = user32.GetSystemMetrics(0)
         screen_height = user32.GetSystemMetrics(1)
         return screen_width, screen_height
@@ -57,76 +58,146 @@ class WindowGridManager:
             if not pos["is_occupied"]:
                 pos["is_occupied"] = True
                 return pos
-        raise RuntimeError("Нет свободных мест для окон.")
+        raise RuntimeError("Không còn vị trí trống cho cửa sổ.")
 
     def release_position(self, pos_id):
         for pos in self.grid:
             if pos["id"] == pos_id:
                 pos["is_occupied"] = False
                 return
-        raise ValueError(f"Позиция {pos_id} не найдена.")
+        raise ValueError(f"Vị trí {pos_id} không tồn tại.")
 
     def reset(self):
         for pos in self.grid:
             pos["is_occupied"] = False
 
-
 class BrowserHandler(metaclass=Singleton):
     def __init__(self):
         self.playwright = None
         self.browser = None
-        self.proxy = self.read_proxy()
         self.window_manager = WindowGridManager()
+        self.proxy_config = {
+            "api_key": os.getenv('KIOT_PROXY_KEY'),
+            "region": os.getenv('PROXY_REGION', 'random'),
+            "proxy": None,
+            "ttc": 59,
+            "last_fetch": 0,
+            "lock": asyncio.Lock()
+        }
+        self.proxy_task = None
 
-    @staticmethod
-    def read_proxy():
-        if proxy := os.getenv('PROXY'):
-            return Proxy(proxy).playwright
+    async def _load_kiotproxy(self):
+        """Tải proxy mới từ KiotProxy API"""
+        config = self.proxy_config
+        async with config["lock"]:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f"https://api.kiotproxy.com/api/v1/proxies/new?key={config['api_key']}&region={config['region']}"
+                    async with session.get(url, timeout=10) as resp:
+                        data = await resp.json()
+                        if data["success"]:
+                            proxy_data = data["data"]
+                            config["proxy"] = f"http://{proxy_data['http']}"
+                            config["ttc"] = proxy_data["ttc"]
+                            config["last_fetch"] = time.time()
+                            logger.success(
+                                f"Đã tải proxy: {proxy_data['http']} | "
+                                f"Vị trí: {proxy_data['location']} | "
+                                f"TTC: {proxy_data['ttc']}s"
+                            )
+                        else:
+                            error_msg = data.get('message', 'Lỗi không xác định')
+                            logger.error(f"Lỗi API KiotProxy: {error_msg}")
+                            if "giới hạn" in error_msg or "rate" in error_msg.lower():
+                                logger.warning("Phát hiện giới hạn rate, chờ 60s...")
+                                await asyncio.sleep(60)
+                            config["proxy"] = None
+                            raise ValueError(error_msg)
+            except aiohttp.ClientError as e:
+                logger.error(f"Lỗi mạng: {str(e)}")
+                raise
+            except Exception as e:
+                logger.error(f"Lỗi tải proxy: {str(e)}")
+                raise
+
+    async def _refresh_proxy_periodically(self):
+        """Làm mới proxy định kỳ"""
+        config = self.proxy_config
+        consecutive_errors = 0
+
+        while True:
+            try:
+                # Kiểm tra proxy còn hợp lệ
+                if config["proxy"] and config["ttc"]:
+                    time_since_fetch = time.time() - config["last_fetch"]
+                    time_remaining = config["ttc"] - time_since_fetch
+                    if time_remaining > 60:
+                        logger.debug(f"Proxy còn hợp lệ trong {time_remaining:.0f}s")
+                        await asyncio.sleep(min(time_remaining - 30, 300))
+                        continue
+
+                # Tải proxy mới
+                logger.info("Đang làm mới proxy...")
+                await self._load_kiotproxy()
+                consecutive_errors = 0
+
+                # Chờ theo TTC
+                wait_time = max(config["ttc"] - 30, 60) if config["ttc"] else 300
+                logger.debug(f"Làm mới tiếp theo sau {wait_time}s")
+                await asyncio.sleep(wait_time)
+
+            except Exception as e:
+                consecutive_errors += 1
+
+                if "giới hạn" in str(e) or "rate" in str(e).lower():
+                    wait_time = min(300 * consecutive_errors, 1800)
+                    logger.error(f"Giới hạn rate #{consecutive_errors}, chờ {wait_time}s")
+                else:
+                    wait_time = min(60 * consecutive_errors, 600)
+                    logger.error(f"Lỗi #{consecutive_errors}: {str(e)}, chờ {wait_time}s")
+
+                await asyncio.sleep(wait_time)
 
     async def launch(self):
+        """Khởi động browser Chrome và task proxy nếu chưa có"""
+        if not self.proxy_task:
+            self.proxy_task = asyncio.create_task(self._refresh_proxy_periodically())
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
+            channel='chrome',  # Sử dụng Chrome
             headless=False,
-            channel='chrome',
             args=[
                 '--disable-blink-features=AutomationControlled',
                 "--window-size=500,200",
-                "--window-position=0,0"],
-            proxy=self.proxy
+                "--window-position=0,0"
+            ]
         )
 
     async def get_page(self):
         if not self.playwright or not self.browser:
             await self.launch()
 
-        context = await self.browser.new_context(viewport={"width": 500, "height": 100})
-        # context = await self.browser.new_context(no_viewport=True)
+        config = self.proxy_config
+        proxy_options = {}
+        async with config["lock"]:
+            if config["proxy"]:
+                proxy_options["proxy"] = {"server": config["proxy"]}
+                logger.debug(f"Sử dụng proxy: {config['proxy']}")
 
-        logger.debug(f"open page")
+        context = await self.browser.new_context(viewport={"width": 500, "height": 100}, **proxy_options)
         page = await context.new_page()
         position = self.window_manager.get_free_position()
         await self.set_window_position(page, position["x"], position["y"])
         page._grid_position_id = position["id"]
         return page
 
-    async def get_pages(self, amount: int = 1):
-        if not self.playwright or not self.browser:
-            await self.launch()
-
-        pages = []
-        for i in range(amount):
-            context = await self.browser.new_context(viewport={"width": 500, "height": 100})
-            logger.debug(f"open page {i}")
-            pages.append(await context.new_page())
-        return pages
-
     @staticmethod
     async def set_window_position(page, x, y):
         session = await page.context.new_cdp_session(page)
-        # Получаем windowId
+        # Lấy windowId
         result = await session.send("Browser.getWindowForTarget")
         window_id = result["windowId"]
-        # Устанавливаем позицию
+        # Đặt vị trí
         await session.send("Browser.setWindowBounds", {
             "windowId": window_id,
             "bounds": {
@@ -138,6 +209,7 @@ class BrowserHandler(metaclass=Singleton):
         })
 
     async def close(self):
+        """Đóng browser"""
         try:
             await self.browser.close()
         except Exception:
@@ -151,7 +223,6 @@ class BrowserHandler(metaclass=Singleton):
         self.window_manager.release_position(page._grid_position_id)
         await page.close()
         await page.context.close()
-
 
 class Browser:
     def __init__(self, page=None):
@@ -173,27 +244,13 @@ class Browser:
                 await BrowserHandler().close_page(self.page)
                 self.page = None
 
-    async def antishadow_inject(self):
-        await self.page.add_init_script("""
-          (function() {
-            const originalAttachShadow = Element.prototype.attachShadow;
-            Element.prototype.attachShadow = function(init) {
-              const shadow = originalAttachShadow.call(this, init);
-              if (init.mode === 'closed') {
-                window.__lastClosedShadowRoot = shadow;
-              }
-              return shadow;
-            };
-          })();
-        """)
-
     async def load_captcha(self, websiteKey: str = '0x4AAAAAAA0SGzxWuGl6kriB', action: str = ''):
         script = f"""
-        // 🧹 Удаляем предыдущую капчу, если есть
+        // Xóa captcha cũ nếu có
         const existing = document.querySelector('#captcha-overlay');
-        if (existing) existing.remove();  // очистка предыдущего
+        if (existing) existing.remove();
 
-        // 🔳 Создаём overlay
+        // Tạo overlay
         const overlay = document.createElement('div');
         overlay.id = 'captcha-overlay';
         overlay.style.position = 'absolute';
@@ -207,7 +264,7 @@ class Browser:
         overlay.style.alignItems = 'center';
         overlay.style.zIndex = '1000';
 
-        // 🧩 Добавляем капчу
+        // Thêm div captcha
         const captchaDiv = document.createElement('div');
         captchaDiv.className = 'cf-turnstile';
         captchaDiv.setAttribute('data-sitekey', '{websiteKey}');
@@ -217,35 +274,33 @@ class Browser:
         overlay.appendChild(captchaDiv);
         document.body.appendChild(overlay);
 
-        // 📜 Загружаем Cloudflare Turnstile
+        // Tải script Cloudflare Turnstile
         const script = document.createElement('script');
         script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
         script.async = true;
         script.defer = true;
         document.head.appendChild(script);
         """
-
-        # Выполняем скрипт в браузере через Selenium
         await self.page.evaluate(script)
 
     async def wait_for_turnstile_token(self) -> str | None:
         locator = self.page.locator('input[name="cf-turnstile-response"]')
 
         token = ""
-        t = time()
+        t = time.time()
         while not token:
             await asyncio.sleep(0.5)
             try:
                 token = await locator.input_value(timeout=500)
                 if await self.check_for_checkbox():
-                    logger.debug('click checkbox')
+                    logger.debug('Nhấp checkbox')
             except Exception as er:
                 logger.error(er)
                 pass
             if token:
-                logger.debug(f'got captcha token: {token}')
-            if t + 15 < time():
-                logger.warning('token not found')
+                logger.debug(f'Nhận token captcha: {token}')
+            if t + 15 < time.time():
+                logger.warning('Không tìm thấy token')
                 return None
         return token
 
@@ -257,74 +312,58 @@ class Browser:
         return _x + x + random.randint(5, 10), _y + y + random.randint(75, 85)
 
     async def check_for_checkbox(self):
-        # 📸 Скриншот без сохранения в файл
+        # Chụp màn hình
         image_bytes = await self.page.screenshot(full_page=True)
 
-        # 🧠 Преобразуем для OpenCV
+        # Xử lý với OpenCV
         screen_np = np.frombuffer(image_bytes, dtype=np.uint8)
         screen = cv2.imdecode(screen_np, cv2.IMREAD_COLOR)
 
-        # 📥 Загружаем шаблон (из файла)
+        # Tải template checkbox
         template = cv2.imread("screens/checkbox.png")
 
-        # 🔍 Поиск
+        # Khớp template
         result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
         if max_val > 0.9:
-            logger.debug(f"Найден checkbox! Точность: {max_val}")
+            logger.debug(f"Tìm thấy checkbox! Độ chính xác: {max_val}")
             h, w = template.shape[:2]
             center_x = max_loc[0] + w // 2
             center_y = max_loc[1] + h // 2
-            # await self.page.mouse.click(center_x, center_y)
             x, y = self.get_coords_to_click(self.page, center_x, center_y)
             pyautogui.click(x, y)
-            # await self.human_click(center_x, center_y)
-            # await self.cdp_click(center_x, center_y)
             return True
 
-    @staticmethod
-    async def human_like_mouse_move(page, start_x: int, start_y: int, end_x: int, end_y: int, steps: int = 25):
-        """Двигает мышь по кривой с шумом"""
-        await page.mouse.move(start_x, start_y)
+    async def human_like_mouse_move(self, start_x: int, start_y: int, end_x: int, end_y: int, steps: int = 25):
+        """Di chuyển chuột giống con người"""
+        await self.page.mouse.move(start_x, start_y)
         for i in range(1, steps + 1):
             progress = i / steps
             x_noise = random.uniform(-1, 1)
             y_noise = random.uniform(-1, 1)
             x = start_x + (end_x - start_x) * progress + x_noise
             y = start_y + (end_y - start_y) * progress + y_noise
-            await page.mouse.move(x, y)
+            await self.page.mouse.move(x, y)
             await asyncio.sleep(random.uniform(0.005, 0.02))
 
     async def human_click(self, x: int, y: int):
-        page = self.page
-        """Реалистичный человекоподобный клик по координатам (x, y)"""
-        # Получим текущую позицию мыши (грубо, начнем с (0,0) если не знаем)
+        """Nhấp chuột giống con người"""
         try:
-            # Эвристика — просто двигай мышь в левый верхний угол перед началом
-            await page.mouse.move(0, 0)
+            await self.page.mouse.move(0, 0)
         except Exception:
             pass
 
-        # Подобие дрожащей руки: движение к цели с флуктуациями
-        await self.human_like_mouse_move(page, 0, 0, x, y, steps=random.randint(15, 30))
-
-        # Маленькая задержка перед нажатием (реакция человека)
+        await self.human_like_mouse_move(0, 0, x, y, steps=random.randint(15, 30))
         await asyncio.sleep(random.uniform(0.05, 0.15))
-
-        # Клик: нажатие, задержка и отпускание
-        await page.mouse.down()
+        await self.page.mouse.down()
         await asyncio.sleep(random.uniform(0.05, 0.12))
-        await page.mouse.up()
-
-        # После клика мышь может немного дрогнуть
+        await self.page.mouse.up()
         if random.random() < 0.4:
-            await page.mouse.move(x + random.randint(-3, 3), y + random.randint(-3, 3))
+            await self.page.mouse.move(x + random.randint(-3, 3), y + random.randint(-3, 3))
 
-    async def route_handler(browser, route):
+    async def route_handler(self, route):
         blocked_extensions = ['.js', '.css', '.png', '.jpg', '.svg', '.gif', '.woff', '.ttf']
-
-        # print(route, request)
         if any(route.request.url.endswith(ext) for ext in blocked_extensions):
             await route.abort()
         else:
