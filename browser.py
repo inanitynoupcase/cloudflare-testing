@@ -1,11 +1,9 @@
-# linux_browser.py - Linux-compatible browser module
-
 import asyncio
 from time import time
 import os
 import random
 import platform
-import aiohttp  # Thêm để gọi API KiotProxy
+import aiohttp 
 
 from patchright.async_api import async_playwright
 from loguru import logger
@@ -39,7 +37,7 @@ except ImportError:
 
 from source import Singleton
 from models import CaptchaTask
-
+K2a5ab890111e49ccb22c7c0271ab4b2f
 load_dotenv()
 
 class LinuxWindowGridManager:
@@ -216,7 +214,7 @@ class BrowserHandler(metaclass=Singleton):
         async with config["lock"]:
             try:
                 async with aiohttp.ClientSession() as session:
-                    url = f"https://api.kiotproxy.com/api/v1/proxies/new?key={config['api_key']}&region={config['region']}"
+                    url = f"https://api.kiotproxy.com/api/v1/proxies/new?key={config['api_key']}&region={PROXY_REGION}"
                     async with session.get(url, timeout=10) as resp:
                         data = await resp.json()
                         if data["success"]:
@@ -496,10 +494,10 @@ class Browser:
         locator = self.page.locator('input[name="cf-turnstile-response"]')
 
         token = ""
-        start_time = time()
+        start_time = time.time()
         timeout = 30  # 30 seconds timeout
         
-        while not token and (time() - start_time) < timeout:
+        while not token and (time.time() - start_time) < timeout:
             await asyncio.sleep(0.5)
             try:
                 token = await locator.input_value(timeout=500)
