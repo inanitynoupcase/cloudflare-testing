@@ -15,6 +15,12 @@ try:
 except ImportError:
     Proxy = None
 
+# Only import psutil for process management
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 # Only import GUI dependencies if on correct platform
 try:
     if platform.system() == "Linux":
@@ -164,9 +170,58 @@ class BrowserHandler(metaclass=Singleton):
         self.proxy_task = None
         self.browser_processes = set()  # Track browser processes
         self.last_cleanup = time()
+
+    @staticmethod
+    def read_proxy():
+        """Read proxy configuration from environment"""
+        if proxy := os.getenv('PROXY'):
+            if Proxy:
+                try:
+                    return Proxy(proxy).playwright
+                except Exception as e:
+                    logger.warning(f"Failed to parse proxy: {e}")
+                    return None
+            else:
+                logger.warning("proxystr not available, proxy ignored")
+                return None
+        return None
+
+    def _should_run_headless(self):
+        """Determine if should run headless based on environment"""
+        
+        # Force headless if explicitly set
+        if os.environ.get('FORCE_HEADLESS', '').lower() == 'true':
+            return True
+            
+        # Run headless if no display available
+        if not os.environ.get('DISPLAY'):
+            logger.info("No DISPLAY environment variable, running headless")
+            return True
+            
+        # Run headless if pyautogui not available
+        if not pyautogui:
+            logger.info("pyautogui not available, running headless")
+            return True
+            
+        # Check if we can actually use the display
+        try:
+            import subprocess
+            result = subprocess.run(['xdpyinfo'], capture_output=True, timeout=5)
+            if result.returncode != 0:
+                logger.info("Cannot access X display, running headless")
+                return True
+        except Exception:
+            logger.info("xdpyinfo not available, running headless")
+            return True
+            
+        logger.info("Display available, running with GUI")
+        return False
         
     def cleanup_zombie_processes(self):
         """Kill zombie browser processes"""
+        if not psutil:
+            return
+            
         try:
             current_time = time()
             if current_time - self.last_cleanup < 60:  # Cleanup every minute
@@ -186,13 +241,85 @@ class BrowserHandler(metaclass=Singleton):
         except Exception as e:
             logger.debug(f"Cleanup error: {e}")
 
+    async def _load_kiotproxy(self):
+        """Load new proxy from KiotProxy API"""
+        config = self.proxy_config
+        async with config["lock"]:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f"https://api.kiotproxy.com/api/v1/proxies/new?key={config['api_key']}&region={config['region']}"
+                    async with session.get(url, timeout=10) as resp:
+                        data = await resp.json()
+                        if data["success"]:
+                            proxy_data = data["data"]
+                            config["proxy"] = f"http://{proxy_data['http']}"
+                            config["ttc"] = proxy_data["ttc"]
+                            config["last_fetch"] = time()
+                            logger.success(
+                                f"Loaded proxy: {proxy_data['http']} | "
+                                f"Location: {proxy_data['location']} | "
+                                f"TTC: {proxy_data['ttc']}s"
+                            )
+                        else:
+                            error_msg = data.get('message', 'Unknown error')
+                            logger.error(f"KiotProxy API error: {error_msg}")
+                            if "limit" in error_msg.lower() or "rate" in error_msg.lower():
+                                logger.warning("Rate limit detected, waiting 60s...")
+                                await asyncio.sleep(60)
+                            config["proxy"] = None
+                            raise ValueError(error_msg)
+            except aiohttp.ClientError as e:
+                logger.error(f"Network error: {str(e)}")
+                raise
+            except Exception as e:
+                logger.error(f"Proxy loading error: {str(e)}")
+                raise
+
+    async def _refresh_proxy_periodically(self):
+        """Refresh proxy periodically"""
+        config = self.proxy_config
+        consecutive_errors = 0
+
+        while True:
+            try:
+                # Check if proxy is still valid
+                if config["proxy"] and config["ttc"]:
+                    time_since_fetch = time() - config["last_fetch"]
+                    time_remaining = config["ttc"] - time_since_fetch
+                    if time_remaining > 60:
+                        logger.debug(f"Proxy valid for {time_remaining:.0f}s")
+                        await asyncio.sleep(min(time_remaining - 30, 300))
+                        continue
+
+                # Load new proxy
+                logger.info("Refreshing proxy...")
+                await self._load_kiotproxy()
+                consecutive_errors = 0
+
+                # Wait according to TTC
+                wait_time = max(config["ttc"] - 30, 60) if config["ttc"] else 300
+                logger.debug(f"Next refresh in {wait_time}s")
+                await asyncio.sleep(wait_time)
+
+            except Exception as e:
+                consecutive_errors += 1
+
+                if "limit" in str(e).lower() or "rate" in str(e).lower():
+                    wait_time = min(300 * consecutive_errors, 1800)
+                    logger.error(f"Rate limit #{consecutive_errors}, waiting {wait_time}s")
+                else:
+                    wait_time = min(60 * consecutive_errors, 600)
+                    logger.error(f"Error #{consecutive_errors}: {str(e)}, waiting {wait_time}s")
+
+                await asyncio.sleep(wait_time)
+
     async def launch(self):
         """Launch browser with improved error handling and cleanup"""
         try:
             # Cleanup old processes first
             self.cleanup_zombie_processes()
             
-            if not self.proxy_task:
+            if not self.proxy_task and self.proxy_config["api_key"]:
                 self.proxy_task = asyncio.create_task(self._refresh_proxy_periodically())
                 
             if self.playwright:
@@ -211,7 +338,6 @@ class BrowserHandler(metaclass=Singleton):
                 '--disable-extensions',
                 '--disable-plugins',
                 '--disable-images',  # Speed up loading
-                '--disable-javascript',  # We'll enable it selectively
                 '--memory-pressure-off',
                 '--max_old_space_size=512',  # Limit memory
             ]
@@ -261,9 +387,9 @@ class BrowserHandler(metaclass=Singleton):
                 if not self.playwright or not self.browser:
                     await self.launch()
 
-                # Create context with timeout
+                # Create context (remove timeout from context_options)
                 config = self.proxy_config
-                context_options = {'timeout': 30000}
+                context_options = {}
                 
                 async with config["lock"]:
                     if config["proxy"]:
@@ -276,7 +402,7 @@ class BrowserHandler(metaclass=Singleton):
                     
                 context = await self.browser.new_context(**context_options)
                 
-                # Set timeout for all pages in context
+                # Set timeout AFTER context creation
                 context.set_default_timeout(30000)
                 context.set_default_navigation_timeout(30000)
 
@@ -302,6 +428,27 @@ class BrowserHandler(metaclass=Singleton):
                     await self.cleanup_all()
                     raise
                 await asyncio.sleep(1)
+
+    async def set_window_position(self, page, x, y):
+        """Set window position (only works in non-headless mode)"""
+        if self.headless:
+            return
+            
+        try:
+            session = await page.context.new_cdp_session(page)
+            result = await session.send("Browser.getWindowForTarget")
+            window_id = result["windowId"]
+            await session.send("Browser.setWindowBounds", {
+                "windowId": window_id,
+                "bounds": {
+                    "left": x,
+                    "top": y,
+                    "width": 500,
+                    "height": 200
+                }
+            })
+        except Exception as e:
+            logger.debug(f"Failed to set window position: {e}")
 
     async def cleanup_all(self):
         """Complete cleanup of all browser resources"""
@@ -358,7 +505,9 @@ class Browser:
         """Improved solve_captcha with proper timeout and cleanup"""
         page = None
         try:
-            async with asyncio.timeout(120):  # 2 minute total timeout
+            # Use asyncio.wait_for instead of asyncio.timeout (for older Python versions)
+            async def _solve():
+                nonlocal page
                 page = await BrowserHandler().get_page()
                 
                 # Determine if we can use advanced features
@@ -366,16 +515,18 @@ class Browser:
                 use_advanced_features = not handler.headless and cv2 and pyautogui
                 
                 if use_advanced_features:
-                    await self.block_rendering()
+                    await self.block_rendering(page)
                     
                 logger.debug(f"Navigating to {task.websiteURL}")
                 await page.goto(task.websiteURL, timeout=30000)
                 
                 if use_advanced_features:
-                    await self.unblock_rendering()
+                    await self.unblock_rendering(page)
                     
                 await self.load_captcha(page, websiteKey=task.websiteKey)
                 return await self.wait_for_turnstile_token(page, use_advanced_features)
+            
+            return await asyncio.wait_for(_solve(), timeout=120)  # 2 minute total timeout
                 
         except asyncio.TimeoutError:
             logger.error("Captcha solving timeout")
@@ -388,7 +539,7 @@ class Browser:
                 await BrowserHandler().close_page(page)
 
     async def load_captcha(self, page, websiteKey: str = '0x4AAAAAAA0SGzxWuGl6kriB', action: str = ''):
-        """Load captcha with improved script"""
+        """Load captcha with improved script and better widget setup"""
         script = f"""
         // Remove previous captcha if exists
         const existing = document.querySelector('#captcha-overlay');
@@ -414,29 +565,142 @@ class Browser:
         captchaDiv.setAttribute('data-sitekey', '{websiteKey}');
         captchaDiv.setAttribute('data-callback', 'onCaptchaSuccess');
         captchaDiv.setAttribute('data-action', '{action}');
+        captchaDiv.setAttribute('data-theme', 'light');
+        captchaDiv.setAttribute('data-size', 'normal');
+        captchaDiv.style.cursor = 'pointer';
 
         overlay.appendChild(captchaDiv);
         document.body.appendChild(overlay);
 
-        // Callback function
+        // Global callback function
         window.onCaptchaSuccess = function(token) {{
-            console.log('Captcha solved:', token);
+            console.log('Captcha solved successfully!');
+            // Store token in a hidden input for easy retrieval
+            let tokenInput = document.querySelector('input[name="cf-turnstile-response"]');
+            if (!tokenInput) {{
+                tokenInput = document.createElement('input');
+                tokenInput.type = 'hidden';
+                tokenInput.name = 'cf-turnstile-response';
+                document.body.appendChild(tokenInput);
+            }}
+            tokenInput.value = token;
         }};
 
-        // Load Cloudflare Turnstile script
-        if (!document.querySelector('script[src*="turnstile"]')) {{
+        // Load Cloudflare Turnstile script if not already loaded
+        if (!document.querySelector('script[src*="turnstile"]') && !window.turnstile) {{
             const script = document.createElement('script');
-            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTurnstileLoad';
             script.async = true;
             script.defer = true;
+            
+            // Add onload callback
+            window.onTurnstileLoad = function() {{
+                console.log('Turnstile script loaded');
+                // Try to render if turnstile API is available
+                if (window.turnstile && window.turnstile.render) {{
+                    try {{
+                        window.turnstile.render('.cf-turnstile', {{
+                            sitekey: '{websiteKey}',
+                            callback: 'onCaptchaSuccess',
+                            action: '{action}',
+                            theme: 'light',
+                            size: 'normal'
+                        }});
+                        console.log('Turnstile widget rendered explicitly');
+                    }} catch (e) {{
+                        console.log('Explicit render failed, using automatic rendering');
+                    }}
+                }}
+            }};
+            
             document.head.appendChild(script);
+            console.log('Turnstile script added to page');
+        }} else {{
+            console.log('Turnstile already loaded or loading');
+            // If already loaded, try to render immediately
+            if (window.turnstile && window.turnstile.render) {{
+                setTimeout(() => {{
+                    try {{
+                        window.turnstile.render('.cf-turnstile', {{
+                            sitekey: '{websiteKey}',
+                            callback: 'onCaptchaSuccess',
+                            action: '{action}',
+                            theme: 'light',
+                            size: 'normal'
+                        }});
+                        console.log('Immediate render successful');
+                    }} catch (e) {{
+                        console.log('Immediate render failed:', e);
+                    }}
+                }}, 1000);
+            }}
         }}
+        
+        // Return success
+        return 'Captcha widget setup completed';
         """
 
-        await page.evaluate(script)
+        try:
+            result = await page.evaluate(script)
+            logger.debug(f"Captcha script executed: {result}")
+            
+            # Wait a bit for the widget to load
+            await asyncio.sleep(2)
+            
+            # Check if widget is visible
+            widget_visible = await page.locator('.cf-turnstile').is_visible(timeout=5000)
+            logger.debug(f"Turnstile widget visible: {widget_visible}")
+            
+        except Exception as e:
+            logger.warning(f"Error loading captcha: {e}")
+            # Try fallback method
+            await self._load_captcha_fallback(page, websiteKey, action)
+
+    async def _load_captcha_fallback(self, page, websiteKey: str, action: str = ''):
+        """Fallback method for loading captcha"""
+        try:
+            logger.info("Using fallback captcha loading method")
+            
+            # Simple widget insertion
+            await page.evaluate(f"""
+                const div = document.createElement('div');
+                div.className = 'cf-turnstile';
+                div.setAttribute('data-sitekey', '{websiteKey}');
+                div.setAttribute('data-callback', 'onCaptchaSuccess');
+                div.style.position = 'fixed';
+                div.style.top = '50%';
+                div.style.left = '50%';
+                div.style.transform = 'translate(-50%, -50%)';
+                div.style.zIndex = '9999';
+                div.style.backgroundColor = 'white';
+                div.style.padding = '20px';
+                div.style.border = '2px solid #ccc';
+                document.body.appendChild(div);
+                
+                window.onCaptchaSuccess = function(token) {{
+                    let input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = 'cf-turnstile-response';
+                    input.value = token;
+                    document.body.appendChild(input);
+                }};
+                
+                if (!document.querySelector('script[src*="turnstile"]')) {{
+                    const script = document.createElement('script');
+                    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+                    script.async = true;
+                    document.head.appendChild(script);
+                }}
+            """)
+            
+            await asyncio.sleep(3)
+            logger.debug("Fallback captcha loaded")
+            
+        except Exception as e:
+            logger.error(f"Fallback captcha loading failed: {e}")
 
     async def wait_for_turnstile_token(self, page, use_advanced_features=False) -> str | None:
-        """Improved token waiting with better error handling"""
+        """Improved token waiting with better error handling and click logic"""
         try:
             locator = page.locator('input[name="cf-turnstile-response"]')
 
@@ -444,22 +708,64 @@ class Browser:
             start_time = time()
             timeout = 90  # 90 seconds timeout
             click_attempted = False
+            last_click_time = 0
             
             while not token and (time() - start_time) < timeout:
                 await asyncio.sleep(1)
                 try:
                     token = await locator.input_value(timeout=1000)
                     
-                    if not token and not click_attempted:
-                        # Try clicking the widget once
-                        try:
-                            widget = page.locator('.cf-turnstile')
-                            if await widget.is_visible(timeout=2000):
-                                await widget.click(timeout=2000)
-                                click_attempted = True
-                                logger.debug('Widget click performed')
-                        except:
-                            pass
+                    if not token:
+                        current_time = time()
+                        
+                        # Try clicking the widget if not clicked recently
+                        if current_time - last_click_time > 5:  # Wait 5 seconds between clicks
+                            try:
+                                # Try different selectors for the turnstile widget
+                                selectors = [
+                                    '.cf-turnstile',
+                                    '[data-sitekey]',
+                                    'iframe[src*="turnstile"]',
+                                    '.cf-turnstile iframe',
+                                    '#cf-chl-widget'
+                                ]
+                                
+                                clicked = False
+                                for selector in selectors:
+                                    try:
+                                        widget = page.locator(selector).first
+                                        if await widget.is_visible(timeout=2000):
+                                            await widget.click(timeout=2000)
+                                            last_click_time = current_time
+                                            clicked = True
+                                            logger.debug(f'Widget clicked using selector: {selector}')
+                                            break
+                                    except:
+                                        continue
+                                
+                                if not clicked and use_advanced_features:
+                                    # Try advanced checkbox detection as fallback
+                                    if await self.check_for_checkbox(page):
+                                        last_click_time = current_time
+                                        logger.debug('Advanced checkbox click performed')
+                                elif not clicked:
+                                    # Try iframe click as last resort
+                                    try:
+                                        iframes = page.locator('iframe')
+                                        iframe_count = await iframes.count()
+                                        for i in range(iframe_count):
+                                            iframe = iframes.nth(i)
+                                            src = await iframe.get_attribute('src')
+                                            if src and 'turnstile' in src:
+                                                await iframe.click(timeout=2000)
+                                                last_click_time = current_time
+                                                logger.debug('Iframe clicked')
+                                                break
+                                    except:
+                                        pass
+                                        
+                            except Exception as click_error:
+                                logger.debug(f'Click attempt failed: {click_error}')
                             
                 except Exception as er:
                     logger.debug(f'Token check error: {er}')
@@ -476,121 +782,8 @@ class Browser:
         except Exception as e:
             logger.error(f"Error waiting for token: {e}")
             return None
-            
-class Browser:
-    def __init__(self, page=None):
-        self.page = page
-        self.lock = asyncio.Lock()
 
-    async def solve_captcha(self, task: CaptchaTask):
-        if not self.page:
-            self.page = await BrowserHandler().get_page()
-
-        async with self.lock:
-            try:
-                # Determine if we can use advanced features
-                handler = BrowserHandler()
-                use_advanced_features = not handler.headless and cv2 and pyautogui
-                
-                if use_advanced_features:
-                    await self.block_rendering()
-                    
-                await self.page.goto(task.websiteURL)
-                
-                if use_advanced_features:
-                    await self.unblock_rendering()
-                    
-                await self.load_captcha(websiteKey=task.websiteKey)
-                return await self.wait_for_turnstile_token(use_advanced_features)
-                
-            except Exception as e:
-                logger.error(f"Error in solve_captcha: {e}")
-                return None
-            finally:
-                await BrowserHandler().close_page(self.page)
-                self.page = None
-
-    async def load_captcha(self, websiteKey: str = '0x4AAAAAAA0SGzxWuGl6kriB', action: str = ''):
-        script = f"""
-        // Remove previous captcha if exists
-        const existing = document.querySelector('#captcha-overlay');
-        if (existing) existing.remove();
-
-        // Create overlay
-        const overlay = document.createElement('div');
-        overlay.id = 'captcha-overlay';
-        overlay.style.position = 'fixed';
-        overlay.style.top = '0';
-        overlay.style.left = '0';
-        overlay.style.width = '100vw';
-        overlay.style.height = '100vh';
-        overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-        overlay.style.display = 'flex';
-        overlay.style.justifyContent = 'center';
-        overlay.style.alignItems = 'center';
-        overlay.style.zIndex = '1000';
-
-        // Add captcha widget
-        const captchaDiv = document.createElement('div');
-        captchaDiv.className = 'cf-turnstile';
-        captchaDiv.setAttribute('data-sitekey', '{websiteKey}');
-        captchaDiv.setAttribute('data-callback', 'onCaptchaSuccess');
-        captchaDiv.setAttribute('data-action', '{action}');
-
-        overlay.appendChild(captchaDiv);
-        document.body.appendChild(overlay);
-
-        // Load Cloudflare Turnstile script
-        if (!document.querySelector('script[src*="turnstile"]')) {{
-            const script = document.createElement('script');
-            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-            script.async = true;
-            script.defer = true;
-            document.head.appendChild(script);
-        }}
-        """
-
-        await self.page.evaluate(script)
-
-    async def wait_for_turnstile_token(self, use_advanced_features=False) -> str | None:
-        locator = self.page.locator('input[name="cf-turnstile-response"]')
-
-        token = ""
-        start_time = time.time()
-        timeout = 30  # 30 seconds timeout
-        
-        while not token and (time.time() - start_time) < timeout:
-            await asyncio.sleep(0.5)
-            try:
-                token = await locator.input_value(timeout=500)
-                
-                if not token and use_advanced_features:
-                    # Try advanced checkbox detection
-                    if await self.check_for_checkbox():
-                        logger.debug('Advanced checkbox click performed')
-                elif not token:
-                    # Fallback: simple click attempt
-                    try:
-                        widget = self.page.locator('.cf-turnstile')
-                        if await widget.is_visible(timeout=1000):
-                            await widget.click(timeout=1000)
-                            logger.debug('Simple widget click performed')
-                    except:
-                        pass
-                        
-            except Exception as er:
-                logger.debug(f'Token check error: {er}')
-                
-            if token:
-                logger.debug(f'Got captcha token: {token[:50]}...')
-                break
-                
-        if not token:
-            logger.warning('Token not found within timeout')
-            
-        return token
-
-    async def check_for_checkbox(self):
+    async def check_for_checkbox(self, page):
         """Advanced checkbox detection using computer vision"""
         
         if not cv2 or not np or not pyautogui:
@@ -599,7 +792,7 @@ class Browser:
             
         try:
             # Take screenshot
-            image_bytes = await self.page.screenshot(full_page=True)
+            image_bytes = await page.screenshot(full_page=True)
             screen_np = np.frombuffer(image_bytes, dtype=np.uint8)
             screen = cv2.imdecode(screen_np, cv2.IMREAD_COLOR)
 
@@ -625,7 +818,7 @@ class Browser:
                 center_y = max_loc[1] + h // 2
                 
                 # Calculate screen coordinates
-                x, y = self.get_coords_to_click(self.page, center_x, center_y)
+                x, y = self.get_coords_to_click(page, center_x, center_y)
                 
                 # Perform click
                 pyautogui.click(x, y)
@@ -661,8 +854,8 @@ class Browser:
         else:
             await route.continue_()
 
-    async def block_rendering(self):
-        await self.page.route("**/*", self.route_handler)
+    async def block_rendering(self, page):
+        await page.route("**/*", self.route_handler)
 
-    async def unblock_rendering(self):
-        await self.page.unroute("**/*", self.route_handler)
+    async def unblock_rendering(self, page):
+        await page.unroute("**/*", self.route_handler)
