@@ -186,14 +186,14 @@ Before starting the application, you need to create a `.env` file in the root di
 ```
 # API Authentication
 API_KEY=your_secret_api_key_here
+KIOT_PROXY_KEY= your_key
 
 # Server settings
 PORT=your_number
 LOG_LEVEL=INFO
 max_workers=your_number
-
-# Browser settings (from original project 2)
-# PROXY=username:password@host:port
+# SCREEN_WIDTH=1920
+# SCREEN_HEIGHT=1080
 ```
 
 ## Support
