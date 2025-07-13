@@ -10,3 +10,5 @@ hypercorn
 
 pyautogui
 opencv-python
+aiohttp
+quart
