@@ -116,7 +116,7 @@ python3 api_wrapper.py \
   --api-key your_custom_key
 ```
 
-### API Endpoints
+### API Endpoints (Local)
 
 #### 📡 **Core CAPTCHA API**
 
