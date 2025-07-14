@@ -14,6 +14,7 @@ class Tasker:
     _last_clear = time()
 
     solvers = {'AntiTurnstileTaskProxyLess': None}
+    
     @classmethod
     def _get_valid_api_keys(cls) -> List[str]:
         """Get all valid API keys from environment"""
