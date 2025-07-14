@@ -14,6 +14,38 @@ class Tasker:
     _last_clear = time()
 
     solvers = {'AntiTurnstileTaskProxyLess': None}
+    @classmethod
+    def _get_valid_api_keys(cls) -> List[str]:
+        """Get all valid API keys from environment"""
+        valid_keys = []
+        
+        # Primary API key
+        primary_key = os.getenv('API_KEY')
+        if primary_key:
+            valid_keys.append(primary_key)
+        
+        # Additional API keys (comma separated)
+        additional_keys = os.getenv('ADDITIONAL_API_KEYS', '')
+        if additional_keys:
+            keys = [key.strip() for key in additional_keys.split(',') if key.strip()]
+            valid_keys.extend(keys)
+        
+        # Individual API keys (API_KEY_2, API_KEY_3, etc.)
+        for i in range(2, 11):  # Support up to API_KEY_10
+            key = os.getenv(f'API_KEY_{i}')
+            if key:
+                valid_keys.append(key)
+        
+        return valid_keys
+
+    @classmethod
+    def _is_valid_api_key(cls, client_key: str) -> bool:
+        """Check if provided API key is valid"""
+        if not client_key:
+            return False
+            
+        valid_keys = cls._get_valid_api_keys()
+        return client_key in valid_keys
 
     @classmethod
     def add_task(cls, payload: CaptchaCreateTaskPayload) -> CaptchaTaskResponse:
@@ -28,8 +60,9 @@ class Tasker:
             if not cls.solvers.get('AntiTurnstileTaskProxyLess'):
                 return CaptchaTaskResponse(status='error', errorId=1, errorDescription='Service temporary unavailable')
 
-            if payload.clientKey != os.getenv('API_KEY'):
-                return CaptchaTaskResponse(status='error', errorId=1, errorDescription='Wrong clientKey')
+            # Updated API key validation
+            if not cls._is_valid_api_key(payload.clientKey):
+                return CaptchaTaskResponse(status='error', errorId=1, errorDescription='Invalid API key')
 
             if payload.task.type not in ('AntiTurnstileTaskProxyLess', ):
                 return CaptchaTaskResponse(status='error', errorId=1, errorDescription='Unsupported captcha type')
@@ -65,8 +98,9 @@ class Tasker:
             if isinstance(payload, dict):
                 payload = CaptchaGetTaskPayload(**payload)
 
-            if payload.clientKey != os.getenv('API_KEY'):
-                return CaptchaTaskResponse(status='error', errorId=1, errorDescription='Wrong clientKey')
+            # Updated API key validation
+            if not cls._is_valid_api_key(payload.clientKey):
+                return CaptchaTaskResponse(status='error', errorId=1, errorDescription='Invalid API key')
 
             if payload.taskId in cls.results:
                 return cls.results[payload.taskId]['result']
@@ -84,6 +118,16 @@ class Tasker:
         finally:
             if cls._last_clear + 30 < time():
                 cls.clear_expired()
+
+        # Optional: Add method to list valid keys (for debugging)
+    @classmethod
+    def list_valid_keys(cls) -> dict:
+        """List valid API keys (for admin purposes)"""
+        keys = cls._get_valid_api_keys()
+        return {
+            "total_keys": len(keys),
+            "keys_preview": [key[:8] + "..." for key in keys]  # Show only first 8 chars
+        }
 
     @classmethod
     def clear_expired(cls, task_timeout: int = 120, result_timeout: int = 5 * 60) -> None:

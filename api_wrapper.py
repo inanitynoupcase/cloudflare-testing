@@ -230,22 +230,34 @@ class DockerTurnstileAPI:
             }), 500
             
     async def turnstile_simple(self):
-        """Simple GET endpoint for external compatibility"""
+        """Simple GET endpoint with multiple API key support"""
         try:
             url = request.args.get('url')
             sitekey = request.args.get('sitekey')
             action = request.args.get('action', '')
+            api_key = request.args.get('key') or request.args.get('api_key')
             
             if not url or not sitekey:
                 return jsonify({
                     "error": "Missing required parameters: url, sitekey"
                 }), 400
-                
-            logger.info(f"🎯 Simple request: {url} | {sitekey}")
             
-            # Create task using existing format
+            # Validate API key
+            if not api_key:
+                return jsonify({
+                    "error": "Missing API key. Use ?key=your_api_key"
+                }), 401
+            
+            if not self._is_valid_api_key(api_key):
+                return jsonify({
+                    "error": "Invalid API key"
+                }), 401
+                
+            logger.info(f"🎯 Simple request: {url} | {sitekey} | Key: {api_key[:8]}...")
+            
+            # Create task using the provided API key
             task_data = {
-                "clientKey": os.getenv('API_KEY', 'default_key'),
+                "clientKey": api_key,  # Use provided key instead of default
                 "task": {
                     "type": "AntiTurnstileTaskProxyLess",
                     "websiteURL": url,
@@ -271,18 +283,30 @@ class DockerTurnstileAPI:
         except Exception as e:
             logger.error(f"❌ Error in turnstile_simple: {e}")
             return jsonify({"error": str(e)}), 500
-            
+      
     async def get_result_simple(self):
-        """Simple GET endpoint for result retrieval"""
+        """Simple GET endpoint for result retrieval with multiple API key support"""
         try:
             task_id = request.args.get('id')
+            api_key = request.args.get('key') or request.args.get('api_key')
             
             if not task_id:
                 return jsonify({"error": "Missing task id parameter"}), 400
-                
-            # Use existing app_tasker logic
+            
+            # Validate API key
+            if not api_key:
+                return jsonify({
+                    "error": "Missing API key. Use ?key=your_api_key"
+                }), 401
+            
+            if not self._is_valid_api_key(api_key):
+                return jsonify({
+                    "error": "Invalid API key"
+                }), 401
+            
+            # Use provided API key
             get_data = {
-                "clientKey": os.getenv('API_KEY', 'default_key'),
+                "clientKey": api_key,  # Use provided key
                 "taskId": task_id
             }
             
@@ -312,7 +336,7 @@ class DockerTurnstileAPI:
         except Exception as e:
             logger.error(f"❌ Error in get_result_simple: {e}")
             return jsonify({"error": str(e)}), 500
-
+            
     async def health(self):
         """Detailed health endpoint"""
         try:
@@ -347,7 +371,37 @@ class DockerTurnstileAPI:
                 "status": "error",
                 "error": str(e)
             }), 500
+    def _get_valid_api_keys(self) -> List[str]:
+        """Get all valid API keys from environment"""
+        valid_keys = []
+        
+        # Primary API key
+        primary_key = os.getenv('API_KEY')
+        if primary_key:
+            valid_keys.append(primary_key)
+        
+        # Additional API keys (comma separated)
+        additional_keys = os.getenv('ADDITIONAL_API_KEYS', '')
+        if additional_keys:
+            keys = [key.strip() for key in additional_keys.split(',') if key.strip()]
+            valid_keys.extend(keys)
+        
+        # Individual API keys (API_KEY_2, API_KEY_3, etc.)
+        for i in range(2, 11):  # Support up to API_KEY_10
+            key = os.getenv(f'API_KEY_{i}')
+            if key:
+                valid_keys.append(key)
+        
+        return valid_keys
+    
+    def _is_valid_api_key(self, client_key: str) -> bool:
+        """Check if provided API key is valid"""
+        if not client_key:
+            return False
             
+        valid_keys = self._get_valid_api_keys()
+        return client_key in valid_keys
+
     async def status(self):
         """API status endpoint"""
         return jsonify({
