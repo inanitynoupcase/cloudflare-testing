@@ -21,38 +21,58 @@ try:
 except ImportError:
     psutil = None
 
-# Only import GUI dependencies if on correct platform
+# Cross-platform GUI dependencies
 try:
-    if platform.system() == "Linux":
-        # Try to import without failing
+    if platform.system() == "Windows":
         import cv2
         import numpy as np
-        # Skip pyautogui on headless systems
+        import pyautogui
+        try:
+            import win32gui
+            import win32con
+            import win32api
+        except ImportError:
+            win32gui = None
+            win32con = None
+            win32api = None
+    elif platform.system() == "Linux":
+        import cv2
+        import numpy as np
         if os.environ.get('DISPLAY'):
             import pyautogui
         else:
             pyautogui = None
+        win32gui = None
+        win32con = None
+        win32api = None
     else:
         cv2 = None
         np = None
         pyautogui = None
+        win32gui = None
+        win32con = None
+        win32api = None
 except ImportError:
     cv2 = None
     np = None
     pyautogui = None
+    win32gui = None
+    win32con = None
+    win32api = None
 
 from source import Singleton
 from models import CaptchaTask
 
 load_dotenv()
 
-class LinuxWindowGridManager:
-    """Linux-compatible window grid manager"""
+class CrossPlatformWindowGridManager:
+    """Cross-platform window grid manager for Windows and Linux"""
     
     def __init__(self, window_width=500, window_height=200, vertical_overlap=60):
         self.window_width = window_width
         self.window_height = window_height
         self.vertical_step = window_height - vertical_overlap
+        self.system = platform.system()
 
         screen_width, screen_height = self.get_screen_size()
         self.cols = max(1, screen_width // window_width)
@@ -62,6 +82,64 @@ class LinuxWindowGridManager:
         self._generate_grid()
 
     def get_screen_size(self):
+        """Get screen size for both Windows and Linux"""
+        try:
+            if self.system == "Windows":
+                return self._get_windows_screen_size()
+            elif self.system == "Linux":
+                return self._get_linux_screen_size()
+            else:
+                return self._get_fallback_screen_size()
+                
+        except Exception as e:
+            logger.error(f"Error getting screen size: {e}")
+            return 1920, 1080
+
+    def _get_windows_screen_size(self):
+        """Get screen size on Windows"""
+        try:
+            # Method 1: Using win32api (most accurate)
+            if win32api and win32con:
+                width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
+                height = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+                logger.debug(f"Windows screen size from win32api: {width}x{height}")
+                return width, height
+        except Exception as e:
+            logger.debug(f"win32api failed: {e}")
+        
+        try:
+            # Method 2: Using tkinter (fallback)
+            import tkinter as tk
+            root = tk.Tk()
+            width = root.winfo_screenwidth()
+            height = root.winfo_screenheight()
+            root.destroy()
+            logger.debug(f"Windows screen size from tkinter: {width}x{height}")
+            return width, height
+        except Exception as e:
+            logger.debug(f"tkinter failed: {e}")
+        
+        try:
+            # Method 3: Using pyautogui (if available)
+            if pyautogui:
+                size = pyautogui.size()
+                logger.debug(f"Windows screen size from pyautogui: {size.width}x{size.height}")
+                return size.width, size.height
+        except Exception as e:
+            logger.debug(f"pyautogui failed: {e}")
+        
+        # Method 4: Environment variables
+        if os.environ.get('SCREEN_WIDTH') and os.environ.get('SCREEN_HEIGHT'):
+            width = int(os.environ.get('SCREEN_WIDTH'))
+            height = int(os.environ.get('SCREEN_HEIGHT'))
+            logger.debug(f"Windows screen size from env: {width}x{height}")
+            return width, height
+        
+        # Fallback for Windows
+        logger.warning("Could not detect Windows screen size, using default 1920x1080")
+        return 1920, 1080
+
+    def _get_linux_screen_size(self):
         """Get screen size for Linux"""
         try:
             if platform.system() == "Linux":
@@ -112,6 +190,26 @@ class LinuxWindowGridManager:
             logger.error(f"Error getting screen size: {e}")
             return 1920, 1080
 
+    def _get_fallback_screen_size(self):
+        """Fallback screen size detection for other platforms"""
+        try:
+            # Try tkinter first
+            import tkinter as tk
+            root = tk.Tk()
+            width = root.winfo_screenwidth()
+            height = root.winfo_screenheight()
+            root.destroy()
+            logger.debug(f"Fallback screen size from tkinter: {width}x{height}")
+            return width, height
+        except Exception as e:
+            logger.debug(f"Fallback tkinter failed: {e}")
+        
+        # Use environment variables or default
+        width = int(os.environ.get('SCREEN_WIDTH', 1920))
+        height = int(os.environ.get('SCREEN_HEIGHT', 1080))
+        logger.warning(f"Using fallback screen size: {width}x{height}")
+        return width, height
+
     def _generate_grid(self):
         index = 0
         for row in range(self.rows):
@@ -157,8 +255,9 @@ class BrowserHandler(metaclass=Singleton):
         self.playwright = None
         self.browser = None
         self.proxy = self.read_proxy()
-        self.window_manager = LinuxWindowGridManager()
+        self.window_manager = CrossPlatformWindowGridManager()
         self.headless = self._should_run_headless()
+        self.system = platform.system()
         self.proxy_config = {
             "api_key": os.getenv('KIOT_PROXY_KEY'),
             "region": os.getenv('PROXY_REGION', 'random'),
@@ -168,7 +267,7 @@ class BrowserHandler(metaclass=Singleton):
             "lock": asyncio.Lock()
         }
         self.proxy_task = None
-        self.browser_processes = set()  # Track browser processes
+        self.browser_processes = set()
         self.last_cleanup = time()
 
     @staticmethod
@@ -187,12 +286,49 @@ class BrowserHandler(metaclass=Singleton):
         return None
 
     def _should_run_headless(self):
-        """Determine if should run headless based on environment"""
+        """Determine if should run headless based on environment and platform"""
         
         # Force headless if explicitly set
         if os.environ.get('FORCE_HEADLESS', '').lower() == 'true':
             return True
-            
+        
+        system = platform.system()
+        
+        if system == "Windows":
+            return self._should_run_headless_windows()
+        elif system == "Linux":
+            return self._should_run_headless_linux()
+        else:
+            logger.info("Unknown platform, running headless")
+            return True
+
+    def _should_run_headless_windows(self):
+        """Windows-specific headless detection"""
+        # Check if running as Windows service or in background
+        try:
+            if win32gui:
+                # If we can't get foreground window, probably running as service
+                if not win32gui.GetForegroundWindow():
+                    logger.info("Running as Windows service, using headless mode")
+                    return True
+        except:
+            pass
+        
+        # Check if pyautogui is available
+        if not pyautogui:
+            logger.info("pyautogui not available on Windows, running headless")
+            return True
+        
+        # Check if we're in a terminal without GUI
+        if not os.environ.get('SESSIONNAME'):
+            logger.info("No Windows session detected, running headless")
+            return True
+        
+        logger.info("Windows GUI environment detected, running with display")
+        return False
+
+    def _should_run_headless_linux(self):
+        """Linux-specific headless detection"""
         # Run headless if no display available
         if not os.environ.get('DISPLAY'):
             logger.info("No DISPLAY environment variable, running headless")
@@ -214,11 +350,11 @@ class BrowserHandler(metaclass=Singleton):
             logger.info("xdpyinfo not available, running headless")
             return True
             
-        logger.info("Display available, running with GUI")
+        logger.info("Linux display available, running with GUI")
         return False
         
     def cleanup_zombie_processes(self):
-        """Kill zombie browser processes"""
+        """Kill zombie browser processes (cross-platform)"""
         if not psutil:
             return
             
@@ -226,13 +362,17 @@ class BrowserHandler(metaclass=Singleton):
             current_time = time()
             if current_time - self.last_cleanup < 60:  # Cleanup every minute
                 return
+            
+            process_names = ['chrome', 'chromium', 'chromium-browser']
+            if self.system == "Windows":
+                process_names.extend(['chrome.exe', 'chromium.exe', 'msedge.exe'])
                 
             for proc in psutil.process_iter(['pid', 'name', 'create_time']):
                 try:
-                    if proc.info['name'] in ['chrome', 'chromium', 'chromium-browser']:
+                    if proc.info['name'] == process_names:
                         # Kill processes older than 5 minutes
                         if current_time - proc.info['create_time'] > 300:
-                            logger.warning(f"Killing zombie browser process {proc.info['pid']}")
+                            logger.warning(f"Killing zombie browser process {proc.info['pid']} ({proc.info['name']})")
                             proc.kill()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
@@ -257,8 +397,8 @@ class BrowserHandler(metaclass=Singleton):
                             config["last_fetch"] = time()
                             logger.success(
                                 f"Loaded proxy: {proxy_data['http']} | "
-                                f"Location: {proxy_data['location']} | "
-                                f"TTC: {proxy_data['ttc']}s"
+                                f"Location: {proxy_data['location']}"
+ | f"TTC: {proxy_data['ttc']}s"
                             )
                         else:
                             error_msg = data.get('message', 'Unknown error')
@@ -314,7 +454,7 @@ class BrowserHandler(metaclass=Singleton):
                 await asyncio.sleep(wait_time)
 
     async def launch(self):
-        """Launch browser with improved error handling and cleanup"""
+        """Launch browser with cross-platform support"""
         try:
             # Cleanup old processes first
             self.cleanup_zombie_processes()
@@ -330,17 +470,24 @@ class BrowserHandler(metaclass=Singleton):
                     
             self.playwright = await async_playwright().start()
             
-            # Browser arguments with better stability
+            # Cross-platform browser arguments
             args = [
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-extensions',
                 '--disable-plugins',
-                '--disable-images',  # Speed up loading
+                '--disable-images',
                 '--memory-pressure-off',
-                '--max_old_space_size=512',  # Limit memory
+                '--max_old_space_size=512',
             ]
+            
+            # Platform-specific arguments
+            if self.system == "Windows":
+                args.extend([
+                    '--disable-gpu-sandbox',
+                    '--disable-software-rasterizer',
+                ])
             
             if not self.headless:
                 args.extend([
@@ -357,37 +504,37 @@ class BrowserHandler(metaclass=Singleton):
             launch_options = {
                 'headless': self.headless,
                 'args': args,
-                'timeout': 30000,  # 30 second timeout
+                'timeout': 30000,
             }
             
             if self.proxy:
                 launch_options['proxy'] = self.proxy
                 
-            # Launch with timeout
+            # Launch browser
             try:
                 self.browser = await asyncio.wait_for(
                     self.playwright.chromium.launch(**launch_options),
                     timeout=30
                 )
-                logger.success("Browser launched successfully")
+                logger.success(f"Browser launched successfully on {self.system}")
             except asyncio.TimeoutError:
                 logger.error("Browser launch timeout")
                 raise
                 
         except Exception as e:
-            logger.error(f"Failed to launch browser: {e}")
+            logger.error(f"Failed to launch browser on {self.system}: {e}")
             await self.cleanup_all()
             raise
 
     async def get_page(self):
-        """Get page with timeout and retry logic"""
+        """Get page with cross-platform support"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 if not self.playwright or not self.browser:
                     await self.launch()
 
-                # Create context (remove timeout from context_options)
+                # Create context
                 config = self.proxy_config
                 context_options = {}
                 
@@ -430,10 +577,61 @@ class BrowserHandler(metaclass=Singleton):
                 await asyncio.sleep(1)
 
     async def set_window_position(self, page, x, y):
-        """Set window position (only works in non-headless mode)"""
+        """Set window position (cross-platform)"""
         if self.headless:
             return
             
+        try:
+            if self.system == "Windows":
+                await self._set_window_position_windows(page, x, y)
+            else:
+                await self._set_window_position_linux(page, x, y)
+        except Exception as e:
+            logger.debug(f"Failed to set window position: {e}")
+
+    async def _set_window_position_windows(self, page, x, y):
+        """Set window position on Windows"""
+        try:
+            # Method 1: Chrome DevTools Protocol
+            session = await page.context.new_cdp_session(page)
+            result = await session.send("Browser.getWindowForTarget")
+            window_id = result["windowId"]
+            await session.send("Browser.setWindowBounds", {
+                "windowId": window_id,
+                "bounds": {
+                    "left": x,
+                    "top": y,
+                    "width": 500,
+                    "height": 200
+                }
+            })
+            logger.debug(f"Windows window positioned at {x},{y}")
+        except Exception as e:
+            logger.debug(f"Windows CDP positioning failed: {e}")
+            
+            # Method 2: Try win32gui if available
+            if win32gui and win32con:
+                try:
+                    await asyncio.sleep(0.5)  # Wait for window to appear
+                    
+                    def enum_windows_callback(hwnd, windows):
+                        if win32gui.IsWindowVisible(hwnd):
+                            window_text = win32gui.GetWindowText(hwnd)
+                            if "Chrome" in window_text or "Chromium" in window_text:
+                                windows.append(hwnd)
+                    
+                    windows = []
+                    win32gui.EnumWindows(enum_windows_callback, windows)
+                    
+                    if windows:
+                        hwnd = windows[-1]  # Get the latest window
+                        win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, x, y, 500, 200, win32con.SWP_SHOWWINDOW)
+                        logger.debug(f"Windows window positioned via win32gui at {x},{y}")
+                except Exception as e2:
+                    logger.debug(f"win32gui positioning failed: {e2}")
+
+    async def _set_window_position_linux(self, page, x, y):
+        """Set window position on Linux"""
         try:
             session = await page.context.new_cdp_session(page)
             result = await session.send("Browser.getWindowForTarget")
@@ -447,8 +645,9 @@ class BrowserHandler(metaclass=Singleton):
                     "height": 200
                 }
             })
+            logger.debug(f"Linux window positioned at {x},{y}")
         except Exception as e:
-            logger.debug(f"Failed to set window position: {e}")
+            logger.debug(f"Linux CDP positioning failed: {e}")
 
     async def cleanup_all(self):
         """Complete cleanup of all browser resources"""
@@ -502,10 +701,9 @@ class Browser:
         self.lock = asyncio.Lock()
 
     async def solve_captcha(self, task: CaptchaTask):
-        """Improved solve_captcha with proper timeout and cleanup"""
+        """Cross-platform captcha solving"""
         page = None
         try:
-            # Use asyncio.wait_for instead of asyncio.timeout (for older Python versions)
             async def _solve():
                 nonlocal page
                 page = await BrowserHandler().get_page()
@@ -519,14 +717,16 @@ class Browser:
                     
                 logger.debug(f"Navigating to {task.websiteURL}")
                 await page.goto(task.websiteURL, timeout=30000)
+
                 
                 if use_advanced_features:
                     await self.unblock_rendering(page)
                     
                 await self.load_captcha(page, websiteKey=task.websiteKey)
+                await page.reload(timeout=30000)  # Thêm refresh page ngay sau khi mở URL
                 return await self.wait_for_turnstile_token(page, use_advanced_features)
             
-            return await asyncio.wait_for(_solve(), timeout=120)  # 2 minute total timeout
+            return await asyncio.wait_for(_solve(), timeout=120)
                 
         except asyncio.TimeoutError:
             logger.error("Captcha solving timeout")
@@ -575,6 +775,7 @@ class Browser:
         // Global callback function
         window.onCaptchaSuccess = function(token) {{
             console.log('Captcha solved successfully!');
+            
             // Store token in a hidden input for easy retrieval
             let tokenInput = document.querySelector('input[name="cf-turnstile-response"]');
             if (!tokenInput) {{
@@ -598,28 +799,6 @@ class Browser:
                 console.log('Turnstile script loaded');
                 // Try to render if turnstile API is available
                 if (window.turnstile && window.turnstile.render) {{
-                    try {{
-                        window.turnstile.render('.cf-turnstile', {{
-                            sitekey: '{websiteKey}',
-                            callback: 'onCaptchaSuccess',
-                            action: '{action}',
-                            theme: 'light',
-                            size: 'normal'
-                        }});
-                        console.log('Turnstile widget rendered explicitly');
-                    }} catch (e) {{
-                        console.log('Explicit render failed, using automatic rendering');
-                    }}
-                }}
-            }};
-            
-            document.head.appendChild(script);
-            console.log('Turnstile script added to page');
-        }} else {{
-            console.log('Turnstile already loaded or loading');
-            // If already loaded, try to render immediately
-            if (window.turnstile && window.turnstile.render) {{
-                setTimeout(() => {{
                     try {{
                         window.turnstile.render('.cf-turnstile', {{
                             sitekey: '{websiteKey}',
