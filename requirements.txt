@@ -1,3 +1,5 @@
+# requirements.txt - Cross-platform support
+
 # Core Dependencies
 loguru>=0.7.0
 pydantic>=2.0.0
@@ -16,55 +18,49 @@ hypercorn>=0.14.0
 aiohttp>=3.8.0
 httpx>=0.24.0
 
-# Proxy Support (Optional)
-proxystr>=0.1.0
-
-# System Monitoring & Process Management
+# System Monitoring (cross-platform)
 psutil>=5.9.0
 
-# Computer Vision (Optional - for advanced features)
-opencv-python>=4.8.0; platform_system=="Linux"
-numpy>=1.24.0; platform_system=="Linux"
-pyautogui>=0.9.54; platform_system=="Linux"
+# Computer Vision & Automation (cross-platform)
+opencv-python>=4.8.0
+numpy>=1.24.0
+pyautogui>=0.9.54
 
-# Development & Testing (Optional)
+# Proxy Support (optional)
+proxystr>=0.1.0
+
+# Windows-specific (only install on Windows)
+pywin32>=306; platform_system=="Windows"
+
+# Linux-specific (only install on Linux)
+python-xlib>=0.33; platform_system=="Linux"
+
+# Additional cross-platform utilities
+requests>=2.31.0
+websockets>=11.0.0
+asyncio-throttle>=1.0.2
+orjson>=3.9.0
+python-dateutil>=2.8.0
+shortuuid>=1.0.0
+pyyaml>=6.0
+colorama>=0.4.6
+cryptography>=41.0.0
+
+# Development & Testing (optional)
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 black>=23.0.0
 flake8>=6.0.0
 
-# Additional Utilities
-requests>=2.31.0
-websockets>=11.0.0
-
-# Async Utilities
-asyncio-throttle>=1.0.2
-
-# JSON Processing
-orjson>=3.9.0
-
-# Date/Time Utilities
-python-dateutil>=2.8.0
-
-# UUID Generation
-shortuuid>=1.0.0
-
-# Configuration Management
-pyyaml>=6.0
-
-# Monitoring & Metrics (Optional)
+# Monitoring & Metrics (optional)
 prometheus-client>=0.17.0
 
-# Database (Optional - for task persistence)
+# Database (optional)
 aiosqlite>=0.19.0
 
-# Caching (Optional)
+# Caching (optional)
 redis>=4.6.0
 aioredis>=2.0.0
 
-# Logging Enhancements
+# Logging enhancements
 structlog>=23.1.0
-colorama>=0.4.6
-
-# Security
-cryptography>=41.0.0
