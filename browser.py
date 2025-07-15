@@ -207,15 +207,12 @@ class CrossPlatformWindowManager:
 
 class BrowserHandler(metaclass=Singleton):
     def __init__(self):
-        # Initialize system first (needed by other methods)
-        self.system = platform.system()
-        
-        # Initialize other attributes
         self.playwright = None
         self.browser = None
         self.proxy = self.read_proxy()
         self.window_manager = CrossPlatformWindowManager()
         self.headless = self._should_run_headless()
+        self.system = platform.system()
         
         self.proxy_config = {
             "api_key": os.getenv('KIOT_PROXY_KEY'),
@@ -238,8 +235,9 @@ class BrowserHandler(metaclass=Singleton):
             logger.info("Forced headless mode via environment variable")
             return True
         
-        # Use self.system instead of system variable
-        if self.system == "Windows":
+        system = self.system
+        
+        if system == "Windows":
             # On Windows, check for GUI capabilities
             if not pyautogui:
                 logger.info("GUI automation not available on Windows, running headless")
@@ -247,7 +245,7 @@ class BrowserHandler(metaclass=Singleton):
             logger.info("Windows GUI mode available")
             return False
             
-        elif self.system == "Linux":
+        elif system == "Linux":
             # On Linux, check for X11 display
             if not os.environ.get('DISPLAY'):
                 logger.info("No DISPLAY environment variable, running headless")
@@ -260,7 +258,7 @@ class BrowserHandler(metaclass=Singleton):
             
         else:
             # macOS or other - default to headless
-            logger.info(f"Platform {self.system} - defaulting to headless")
+            logger.info(f"Platform {system} - defaulting to headless")
             return True
 
     @staticmethod
@@ -448,8 +446,7 @@ class BrowserHandler(metaclass=Singleton):
             # Try platform-preferred browsers first
             if self.system == "Windows" and not self.headless:
                 # Windows GUI: Edge -> Chrome -> Chromium
-                # for channel in ['msedge', 'chrome']:
-                for channel in ['chrome']:
+                for channel in ['msedge', 'chrome']:
                     try:
                         launch_options['channel'] = channel
                         self.browser = await asyncio.wait_for(
